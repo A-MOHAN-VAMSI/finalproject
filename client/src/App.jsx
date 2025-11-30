@@ -1,5 +1,6 @@
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { useEffect } from 'react';
+import LandingPage from './pages/LandingPage';
 import StudentLogin from './pages/StudentLogin';
 import TeacherLogin from './pages/TeacherLogin';
 import Dashboard from './pages/Dashboard';
@@ -37,7 +38,12 @@ function AppContent() {
     return <TeacherLogin />;
   }
 
-  return <StudentLogin />;
+  if (path === '/student-login') {
+    return <StudentLogin />;
+  }
+
+  // Default: show landing page
+  return <LandingPage />;
 }
 
 function App() {
