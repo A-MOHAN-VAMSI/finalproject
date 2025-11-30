@@ -8,7 +8,7 @@ const path = require('path');
 
 const app = express();
 const prisma = new PrismaClient();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 3001; // Changed to 3001 for debugging
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
 
 app.use(cors());
@@ -150,11 +150,22 @@ app.get('/api/projects', authenticateToken, async (req, res) => {
         const projects = await prisma.project.findMany({
             include: {
                 teacher: { select: { name: true } },
-                _count: { select: { submissions: true } }
+                _count: { select: { submissions: true } },
+                submissions: {
+                    where: { studentId: req.user.id },
+                    select: { id: true }
+                }
             },
             orderBy: { createdAt: 'desc' }
         });
-        res.json(projects);
+
+        // Transform to add isSubmitted flag
+        const projectsWithStatus = projects.map(p => ({
+            ...p,
+            isSubmitted: p.submissions.length > 0
+        }));
+
+        res.json(projectsWithStatus);
     } catch (error) {
         res.status(500).json({ error: 'Failed to fetch projects' });
     }
@@ -276,6 +287,20 @@ app.get('/api/submissions/all', authenticateToken, async (req, res) => {
     }
 });
 
+// Grade a submission
+app.put('/api/submissions/:id/grade', authenticateToken, requireTeacher, async (req, res) => {
+    try {
+        const { points } = req.body;
+        const submission = await prisma.submission.update({
+            where: { id: parseInt(req.params.id) },
+            data: { points: parseInt(points) }
+        });
+        res.json(submission);
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to grade submission' });
+    }
+});
+
 // Review Routes
 app.post('/api/reviews', authenticateToken, async (req, res) => {
     try {
@@ -358,9 +383,325 @@ app.get('/api/submissions/:id/comments', authenticateToken, async (req, res) => 
     }
 });
 
-app.listen(PORT, () => {
-    console.log(`Server running on http://localhost:${PORT}`);
+// Assignment Routes
+app.post('/api/assignments', authenticateToken, requireTeacher, async (req, res) => {
+    try {
+        const { projectId, reviewerId, submissionId, dueDate } = req.body;
+        const assignment = await prisma.assignment.create({
+            data: {
+                projectId: parseInt(projectId),
+                reviewerId: parseInt(reviewerId),
+                submissionId: parseInt(submissionId),
+                dueDate: new Date(dueDate)
+            },
+            include: {
+                reviewer: { select: { name: true, email: true } },
+                submission: {
+                    include: {
+                        student: { select: { name: true } },
+                        project: { select: { title: true } }
+                    }
+                }
+            }
+        });
+
+        // Create notification for the reviewer
+        await prisma.notification.create({
+            data: {
+                userId: parseInt(reviewerId),
+                message: `You have been assigned to review "${assignment.submission.project.title}" by ${assignment.submission.student.name}`,
+                type: 'INFO'
+            }
+        });
+
+        res.json(assignment);
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Failed to create assignment' });
+    }
 });
+
+app.get('/api/assignments', authenticateToken, async (req, res) => {
+    try {
+        const assignments = await prisma.assignment.findMany({
+            include: {
+                reviewer: { select: { id: true, name: true } },
+                submission: {
+                    include: {
+                        student: { select: { name: true } },
+                        project: { select: { title: true } }
+                    }
+                }
+            },
+            orderBy: { createdAt: 'desc' }
+        });
+        res.json(assignments);
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to fetch assignments' });
+    }
+});
+
+app.get('/api/assignments/my', authenticateToken, async (req, res) => {
+    try {
+        const assignments = await prisma.assignment.findMany({
+            where: { reviewerId: req.user.id },
+            include: {
+                submission: {
+                    include: {
+                        student: { select: { name: true } },
+                        project: { select: { title: true } }
+                    }
+                }
+            },
+            orderBy: { dueDate: 'asc' }
+        });
+        res.json(assignments);
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to fetch your assignments' });
+    }
+});
+
+app.put('/api/assignments/:id/status', authenticateToken, async (req, res) => {
+    try {
+        const { status } = req.body;
+        const assignment = await prisma.assignment.update({
+            where: { id: parseInt(req.params.id) },
+            data: { status }
+        });
+        res.json(assignment);
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to update assignment status' });
+    }
+});
+
+// Notification Routes
+app.get('/api/notifications/my', authenticateToken, async (req, res) => {
+    try {
+        const notifications = await prisma.notification.findMany({
+            where: { userId: req.user.id },
+            orderBy: { createdAt: 'desc' },
+            take: 20
+        });
+        res.json(notifications);
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to fetch notifications' });
+    }
+});
+
+app.put('/api/notifications/:id/read', authenticateToken, async (req, res) => {
+    try {
+        const notification = await prisma.notification.update({
+            where: { id: parseInt(req.params.id) },
+            data: { isRead: true }
+        });
+        res.json(notification);
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to mark notification as read' });
+    }
+});
+
+app.put('/api/notifications/mark-all-read', authenticateToken, async (req, res) => {
+    try {
+        await prisma.notification.updateMany({
+            where: { userId: req.user.id, isRead: false },
+            data: { isRead: true }
+        });
+        res.json({ success: true });
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to mark all as read' });
+    }
+});
+
+// Analytics Routes
+app.get('/api/analytics/overview', authenticateToken, requireTeacher, async (req, res) => {
+    try {
+        const totalProjects = await prisma.project.count();
+        const totalSubmissions = await prisma.submission.count();
+        const totalReviews = await prisma.review.count();
+        const totalStudents = await prisma.user.count({ where: { role: 'STUDENT' } });
+
+        // Get average rating
+        const reviews = await prisma.review.findMany({ select: { score: true } });
+        const avgRating = reviews.length > 0
+            ? (reviews.reduce((sum, r) => sum + r.score, 0) / reviews.length).toFixed(2)
+            : 0;
+
+        // Get average points (performance)
+        const gradedSubmissions = await prisma.submission.findMany({
+            where: { points: { not: null } },
+            select: { points: true }
+        });
+        const avgPoints = gradedSubmissions.length > 0
+            ? (gradedSubmissions.reduce((sum, s) => sum + s.points, 0) / gradedSubmissions.length).toFixed(1)
+            : 0;
+
+        // Get review completion rate
+        const totalAssignments = await prisma.assignment.count();
+        const assignments = await prisma.assignment.findMany();
+        const completedAssignments = assignments.filter(a => a.status === 'COMPLETED').length;
+        const completionRate = assignments.length > 0
+            ? ((completedAssignments / assignments.length) * 100).toFixed(1)
+            : 0;
+
+        // Get submissions by project
+        const submissionsByProject = await prisma.project.findMany({
+            include: {
+                _count: { select: { submissions: true } }
+            }
+        });
+
+        // Get recent activity
+        const recentReviews = await prisma.review.findMany({
+            take: 10,
+            orderBy: { createdAt: 'desc' },
+            include: {
+                reviewer: { select: { name: true } },
+                submission: {
+                    include: {
+                        student: { select: { name: true } },
+                        project: { select: { title: true } }
+                    }
+                }
+            }
+        });
+
+        res.json({
+            overview: {
+                totalProjects,
+                totalSubmissions,
+                totalReviews,
+                totalStudents,
+                totalAssignments,
+                avgRating: parseFloat(avgRating),
+                avgPoints: parseFloat(avgPoints),
+                completionRate: parseFloat(completionRate)
+            },
+            submissionsByProject: submissionsByProject.map(p => ({
+                project: p.title,
+                count: p._count.submissions
+            })),
+            recentActivity: recentReviews
+        });
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Failed to fetch analytics' });
+    }
+});
+
+app.get('/api/analytics/student/:id', authenticateToken, async (req, res) => {
+    try {
+        const studentId = parseInt(req.params.id);
+
+        const student = await prisma.user.findUnique({
+            where: { id: studentId },
+            select: { id: true, name: true, email: true }
+        });
+
+        const submissions = await prisma.submission.findMany({
+            where: { studentId },
+            include: {
+                reviews: { select: { score: true } },
+                project: { select: { title: true } }
+            }
+        });
+
+        const reviewsGiven = await prisma.review.findMany({
+            where: { reviewerId: studentId },
+            include: {
+                submission: {
+                    include: {
+                        student: { select: { name: true } },
+                        project: { select: { title: true } }
+                    }
+                }
+            }
+        });
+
+        res.json({
+            student,
+            submissions: submissions.map(s => ({
+                project: s.project.title,
+                avgRating: s.reviews.length > 0
+                    ? (s.reviews.reduce((sum, r) => sum + r.score, 0) / s.reviews.length).toFixed(1)
+                    : 0,
+                reviewCount: s.reviews.length
+            })),
+            reviewsGiven: reviewsGiven.length
+        });
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to fetch student analytics' });
+    }
+});
+
+app.get('/api/analytics/project/:id', authenticateToken, async (req, res) => {
+    try {
+        const projectId = parseInt(req.params.id);
+
+        const project = await prisma.project.findUnique({
+            where: { id: projectId },
+            include: {
+                submissions: {
+                    include: {
+                        student: { select: { name: true } },
+                        reviews: { select: { score: true } }
+                    }
+                }
+            }
+        });
+
+        const ratingDistribution = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
+        project.submissions.forEach(sub => {
+            sub.reviews.forEach(review => {
+                ratingDistribution[review.score]++;
+            });
+        });
+
+        res.json({
+            project: {
+                title: project.title,
+                description: project.description
+            },
+            submissionCount: project.submissions.length,
+            ratingDistribution,
+            submissions: project.submissions.map(s => ({
+                student: s.student.name,
+                avgRating: s.reviews.length > 0
+                    ? (s.reviews.reduce((sum, r) => sum + r.score, 0) / s.reviews.length).toFixed(1)
+                    : 0,
+                reviewCount: s.reviews.length
+            }))
+        });
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to fetch project analytics' });
+    }
+});
+
+// Start server with debug logging
+const startServer = async () => {
+    try {
+        await prisma.$connect();
+        console.log('Connected to database');
+
+        const server = app.listen(PORT, () => {
+            console.log(`Server running on http://localhost:${PORT}`);
+        });
+
+        server.on('error', (e) => {
+            console.error('Server error:', e);
+        });
+
+        // Keep process alive
+        setInterval(() => {
+            // Heartbeat
+        }, 10000);
+
+    } catch (e) {
+        console.error('Failed to start server:', e);
+        process.exit(1);
+    }
+};
+
+startServer();
 
 process.on('SIGINT', async () => {
     await prisma.$disconnect();

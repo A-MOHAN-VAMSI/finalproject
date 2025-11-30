@@ -15,10 +15,12 @@ model User {
   role      String   @default("STUDENT") // STUDENT, TEACHER
   createdAt DateTime @default(now())
   
-  projects    Project[] // Projects created by teacher
-  submissions Submission[]
-  reviews     Review[]
-  comments    Comment[]
+  projects      Project[] // Projects created by teacher
+  submissions   Submission[]
+  reviews       Review[]
+  comments      Comment[]
+  assignments   Assignment[]
+  notifications Notification[]
 }
 
 model Project {
@@ -32,6 +34,7 @@ model Project {
   createdAt   DateTime @default(now())
 
   submissions Submission[]
+  assignments Assignment[]
 }
 
 model Submission {
@@ -45,8 +48,10 @@ model Submission {
   project   Project  @relation(fields: [projectId], references: [id])
   createdAt DateTime @default(now())
 
-  reviews  Review[]
-  comments Comment[]
+  reviews     Review[]
+  comments    Comment[]
+  assignments Assignment[]
+  points      Int?       // Teacher awarded points (0-100)
 }
 
 model Review {
@@ -68,4 +73,27 @@ model Comment {
   submissionId Int
   submission   Submission @relation(fields: [submissionId], references: [id])
   createdAt    DateTime @default(now())
+}
+
+model Assignment {
+  id           Int        @id @default(autoincrement())
+  projectId    Int
+  project      Project    @relation(fields: [projectId], references: [id])
+  reviewerId   Int
+  reviewer     User       @relation(fields: [reviewerId], references: [id])
+  submissionId Int
+  submission   Submission @relation(fields: [submissionId], references: [id])
+  status       String     @default("PENDING") // PENDING, COMPLETED
+  dueDate      DateTime
+  createdAt    DateTime   @default(now())
+}
+
+model Notification {
+  id        Int      @id @default(autoincrement())
+  userId    Int
+  user      User     @relation(fields: [userId], references: [id])
+  message   String
+  type      String   @default("INFO") // INFO, SUCCESS, WARNING
+  isRead    Boolean  @default(false)
+  createdAt DateTime @default(now())
 }
